@@ -1,0 +1,15 @@
+name: vllm-prefix-cache
+task: offline
+scenarios:
+  # Baseline: 4096 unique prompt tokens per request, so nothing is reusable.
+  - input_tokens: 4096
+    output_tokens: 256
+    max_concurrency: [1, 8, 32]
+  # Same 4096-token prompt length, with 3072 tokens shared by every request
+  # (total prompt = random_prefix_len + input_tokens). The hit rate tops out near
+  # 3072/4096 = 75%; requests that arrive before the prefix is cached miss, so short
+  # runs come in lower.
+  - input_tokens: 1024
+    random_prefix_len: 3072
+    output_tokens: 256
+    max_concurrency: [1, 8, 32]

@@ -11,7 +11,7 @@ from typing import Any
 
 from pytablewriter import MarkdownTableWriter
 
-from furiosa_perf.runner.monitor import HardwareMonitor
+from furiosa_perf.runner.monitor import HardwareMonitor, PrefixCacheCounters
 from furiosa_perf.utils.config import PerformanceBenchConfig, ScenarioConfig
 from furiosa_perf.utils.logger import logger
 
@@ -60,6 +60,7 @@ class VllmPerformanceBenchmark:
             "--random-input-len={input_tokens}",
             "--random-output-len={output_tokens}",
             "--random-range-ratio={random_range_ratio}",
+            "--random-prefix-len={random_prefix_len}",
         ],
         "vl-offline": [
             "--backend=openai-chat",
@@ -67,6 +68,7 @@ class VllmPerformanceBenchmark:
             "--random-input-len={input_tokens}",
             "--random-output-len={output_tokens}",
             "--random-range-ratio={random_range_ratio}",
+            "--random-prefix-len={random_prefix_len}",
             "--random-mm-base-items-per-request={random_mm_base_items_per_request}",
             "--random-mm-bucket-config={random_mm_bucket_config}",
             "--random-mm-limit-mm-per-prompt={random_mm_limit_mm_per_prompt}",
@@ -186,6 +188,11 @@ class VllmPerformanceBenchmark:
         """
         return getattr(scenario, "output_tokens", 0)
 
+    @staticmethod
+    def _scenario_prefix_tokens(scenario: ScenarioConfig) -> int:
+        """Shared-prefix length for a scenario, or ``0`` for tasks without one."""
+        return getattr(scenario, "random_prefix_len", 0)
+
     def _scenario_result_name(self, scenario: ScenarioConfig) -> str:
         """Unique per-scenario result sub-directory name.
 
@@ -196,6 +203,9 @@ class VllmPerformanceBenchmark:
         * ``offline`` / ``vl-offline`` → ``"<isl>.<osl>.<concurrency>"``
         * ``reranker`` → ``"<isl>.b<batch>.<concurrency>"``
         * ``embeddings`` → ``"<isl>.<concurrency>"``
+
+        A non-zero shared prefix appends ``".p<prefix>"``, so prefix-cache runs do not
+        overwrite the plain run of the same shape.
         """
         parts = [str(scenario.input_tokens)]
         if hasattr(scenario, "output_tokens"):
@@ -203,6 +213,8 @@ class VllmPerformanceBenchmark:
         elif hasattr(scenario, "random_batch_size"):
             parts.append(f"b{scenario.random_batch_size}")
         parts.append(str(scenario.max_concurrency))
+        if prefix_tokens := self._scenario_prefix_tokens(scenario):
+            parts.append(f"p{prefix_tokens}")
         return ".".join(parts)
 
     def _get_format_args(self, scenario: ScenarioConfig) -> dict[str, Any]:
@@ -269,6 +281,7 @@ class VllmPerformanceBenchmark:
         command = self._get_command_for_scenario(scenario)
         logger.info(f"Executing: {' '.join(command)} | cwd: {cwd}")
 
+        cache_before = self._snapshot_prefix_cache()
         start_timestamp = datetime.now(UTC).isoformat()
         env = os.environ.copy()
         if hf_token := self.env.get("HF_TOKEN"):
@@ -297,6 +310,7 @@ class VllmPerformanceBenchmark:
             )
         self.bench_process = None
         end_timestamp = datetime.now(UTC).isoformat()
+        cache_after = self._snapshot_prefix_cache()
 
         result = self._parse_results("".join(output_lines), scenario)
         result.update(
@@ -308,8 +322,65 @@ class VllmPerformanceBenchmark:
                 / f"{self.device_name}_{self.used_device_num}_monitoring_log.csv",
             )
         )
+        result.update(self._prefix_cache_summary(scenario, cache_before, cache_after))
         logger.info(f"Parsed result: {result}")
         return result
+
+    def _snapshot_prefix_cache(self) -> PrefixCacheCounters | None:
+        """Read the server's prefix-cache counters, or ``None`` when host/port are unknown."""
+        if not self.host or not self.port:
+            return None
+        return HardwareMonitor.fetch_prefix_cache_counters(self.host, self.port)
+
+    def _prefix_cache_summary(
+        self,
+        scenario: ScenarioConfig,
+        before: PrefixCacheCounters | None,
+        after: PrefixCacheCounters | None,
+    ) -> dict[str, Any]:
+        """Compute the scenario's prefix-cache hit rate from counter snapshots.
+
+        The counters are cumulative, so the delta between the snapshots taken right
+        before and after the benchmark covers exactly this scenario's requests (assuming
+        no other traffic hits the server). The cache itself is not reset between
+        scenarios, so later scenarios may reuse prefixes cached by earlier ones.
+
+        Args:
+            scenario: Scenario that was just run.
+            before: Counters read before the benchmark subprocess started.
+            after: Counters read after it exited.
+
+        Returns:
+            ``{"Prefix Tokens": int, "Prefix Cache Hit Rate(%)": float | "N/A"}``. The
+            hit rate is cached prompt tokens / prompt tokens looked up in the cache.
+        """
+        prefix_tokens = self._scenario_prefix_tokens(scenario)
+        summary: dict[str, Any] = {"Prefix Tokens": prefix_tokens, "Prefix Cache Hit Rate(%)": "N/A"}
+
+        if before is None or after is None:
+            if prefix_tokens:
+                logger.warning(
+                    "The server's /metrics exposes no prefix-cache counters, so the hit rate is N/A. "
+                    f"Check with: curl -s http://{self.host}:{self.port}/metrics | grep -i prefix_cache"
+                )
+            return summary
+
+        queries = after.queries - before.queries
+        hits = after.hits - before.hits
+        if queries <= 0:
+            if prefix_tokens:
+                logger.warning(
+                    "No prefix-cache lookups were recorded during this scenario: prefix caching looks "
+                    "disabled on the server (--no-enable-prefix-caching), or the server restarted."
+                )
+            return summary
+
+        hit_rate = round(hits / queries * 100, 2)
+        summary["Prefix Cache Hit Rate(%)"] = hit_rate
+        logger.info(f"Prefix cache: {hits:.0f} of {queries:.0f} prompt tokens served from cache ({hit_rate}%)")
+        if prefix_tokens and hits <= 0:
+            logger.warning(f"random_prefix_len={prefix_tokens} but the server reported no prefix-cache hits.")
+        return summary
 
     def _parse_results(self, stdout: str, scenario: ScenarioConfig) -> dict[str, Any]:
         """Parse vLLM bench stdout into a structured result dict.

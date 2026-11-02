@@ -133,6 +133,7 @@ devices: 0,1,2,3
 | `devices` | — | Comma-separated RNGD indices to use for serving (e.g. `0,1,2,3`) |
 | `tensor_parallel_size` | inferred from `devices` | TP degree |
 | `served_model_name` | — | Model alias exposed on `/v1/models` |
+| `no_enable_prefix_caching` | `true` | Pass `--no-enable-prefix-caching` to the server. Set to `false` to keep the server default (prefix caching on in both vLLM and furiosa-llm), as needed for [prefix caching scenarios](#prefix-caching-scenarios) |
 
 **Choosing `devices` (Furiosa RNGD)**
 
@@ -202,10 +203,44 @@ scenarios:
 
 | `task` | Description | Required extra fields |
 |---|---|---|
-| `offline` | LLM text generation | `output_tokens`, `random_range_ratio` |
-| `vl-offline` | Vision-language generation | `output_tokens`, `random_mm_*` fields |
+| `offline` | LLM text generation | `output_tokens`, `random_range_ratio`, `random_prefix_len` |
+| `vl-offline` | Vision-language generation | `output_tokens`, `random_prefix_len`, `random_mm_*` fields |
 | `reranker` | Reranking | `random_batch_size` |
 | `embeddings` | Text embeddings | — |
+
+#### Prefix caching scenarios
+
+`random_prefix_len` (default `0`) prepends the same fixed prefix to every prompt
+(vLLM `--random-prefix-len`), like a shared system prompt, so the server can serve
+it from its prefix cache. The prefix adds to `input_tokens`: each prompt is
+`random_prefix_len + input_tokens` tokens long.
+
+```yaml
+# examples/bench/llm_prefix_cache_scenario.yaml (excerpt)
+scenarios:
+  - input_tokens: 1024
+    random_prefix_len: 3072   # 4096-token prompts, 3072 of them shared
+    output_tokens: 256
+    max_concurrency: [1, 8, 32]
+```
+
+Prefix caching must be on in the server: set `no_enable_prefix_caching: false` in
+the server config, or drop `--no-enable-prefix-caching` if you launch the server
+yourself.
+
+Every scenario reports two summary columns:
+
+- `Prefix Tokens`: the scenario's `random_prefix_len`.
+- `Prefix Cache Hit Rate(%)`: the share of prompt tokens served from the prefix
+  cache during the scenario. It comes from the server's cumulative `/metrics`
+  counters (`vllm:prefix_cache_hits` / `vllm:prefix_cache_queries`, or the
+  `furiosa_llm_` equivalents), read just before and after the benchmark.
+  It is `N/A` when the server exposes no such counters, or when no cache lookup
+  happened (prefix caching disabled).
+
+The cache is not cleared between scenarios, so a scenario can hit prefixes left
+over from earlier ones. Run on an otherwise idle server: other traffic would be
+counted in the hit rate.
 
 ---
 
@@ -219,7 +254,7 @@ bench_space/
     └── <name>/<task>/<model>/
         ├── summary_<ISL>_<OSL>.md        # Markdown table
         ├── summary_<ISL>_<OSL>.csv       # CSV summary
-        └── <ISL>.<OSL>.<CONC>/
+        └── <ISL>.<OSL>.<CONC>[.p<PREFIX>]/          # .p<PREFIX> only when random_prefix_len > 0
             ├── <DEVICE>_<NUM>_monitoring_log.csv   # per-scenario hardware metrics
             └── vllm-*.json                         # raw vLLM benchmark output
 ```

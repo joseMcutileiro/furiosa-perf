@@ -8,6 +8,7 @@ CSV-compatible log file.
 from __future__ import annotations
 
 import contextlib
+import re
 import subprocess
 import time
 from dataclasses import astuple, dataclass, fields
@@ -54,6 +55,21 @@ class HardwareMonitorData:
         self.peak_temperature = round(self.peak_temperature, 2)
 
         return ",".join(str(v) for v in astuple(self)) + "\n"
+
+
+# Cumulative prefix-cache counters on the server's `/metrics`, both counted in tokens:
+# vLLM V1 exposes `vllm:prefix_cache_{queries,hits}_total` (older builds used a `gpu_`
+# infix); furiosa-llm metrics use a `furiosa_llm_` prefix. `_created` samples and
+# `external_prefix_cache_*` (KV-connector) counters deliberately do not match.
+_PREFIX_CACHE_METRIC_RE = re.compile(r"^(?:vllm:|furiosa_llm[:_])(?:gpu_)?prefix_cache_(queries|hits)(?:_total)?$")
+
+
+@dataclass(frozen=True)
+class PrefixCacheCounters:
+    """Snapshot of the server's cumulative prefix-cache counters, in tokens."""
+
+    queries: float
+    hits: float
 
 
 class HardwareMonitor:
@@ -107,6 +123,52 @@ class HardwareMonitor:
             return resp.text
         except requests.RequestException:
             return None
+
+    @staticmethod
+    def parse_prefix_cache_counters(metrics_text: str) -> PrefixCacheCounters | None:
+        """Extract the prefix-cache query/hit counters from Prometheus text.
+
+        Samples are summed across label sets (one per engine with data parallelism).
+
+        Args:
+            metrics_text: Body of the server's `/metrics` response.
+
+        Returns:
+            The summed counters, or ``None`` when the server exposes neither counter.
+        """
+        totals = {"queries": 0.0, "hits": 0.0}
+        found = False
+        for line in metrics_text.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            name = line.split("{", 1)[0].split(None, 1)[0]
+            match = _PREFIX_CACHE_METRIC_RE.match(name)
+            if match is None:
+                continue
+            try:
+                # Read the value after the label block: label values may contain spaces.
+                rest = line[line.rindex("}") + 1 :] if "{" in line else line[len(name) :]
+                totals[match.group(1)] += float(rest.split()[0])
+            except (IndexError, ValueError):
+                continue
+            found = True
+        return PrefixCacheCounters(**totals) if found else None
+
+    @staticmethod
+    def fetch_prefix_cache_counters(host: str, port: int) -> PrefixCacheCounters | None:
+        """Snapshot the server's prefix-cache counters.
+
+        Args:
+            host: Hostname/IP of the API server exposing `/metrics`.
+            port: Port of the API server exposing `/metrics`.
+
+        Returns:
+            The current counters, or ``None`` if `/metrics` is unreachable or lacks them.
+        """
+        metrics_text = HardwareMonitor._fetch_metrics_text(host, port)
+        if metrics_text is None:
+            return None
+        return HardwareMonitor.parse_prefix_cache_counters(metrics_text)
 
     @staticmethod
     def _get_process_tree_usage(parent: psutil.Process) -> tuple[float, float]:

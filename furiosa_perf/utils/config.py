@@ -150,15 +150,27 @@ class BaseScenarioConfig:
 
 @dataclass
 class LLMScenarioConfig(BaseScenarioConfig):
-    """Scenario config for the ``offline`` task."""
+    """Scenario config for the ``offline`` task.
+
+    ``random_prefix_len`` prepends the same fixed prefix to every prompt
+    (``--random-prefix-len``), so the server's prefix cache can reuse it. The total
+    prompt length is ``random_prefix_len + input_tokens``.
+    """
 
     random_range_ratio: float = 0.0
     output_tokens: int = 1024
+    random_prefix_len: int = 0
 
     def __post_init__(self) -> None:
-        """Default num_prompts to max_concurrency × 3 when not set."""
+        """Default num_prompts to max_concurrency × 3 when not set; validate the prefix length.
+
+        Raises:
+            ValueError: If ``random_prefix_len`` is negative.
+        """
         if self.num_prompts is None:
             self.num_prompts = self.max_concurrency * 3
+        if self.random_prefix_len < 0:
+            raise ValueError(f"random_prefix_len must be >= 0, got {self.random_prefix_len}")
 
 
 @dataclass
