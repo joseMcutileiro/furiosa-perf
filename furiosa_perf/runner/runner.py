@@ -6,6 +6,7 @@ import signal
 import subprocess
 import time
 from dataclasses import asdict
+from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Event as EventType
 from pathlib import Path
 from typing import Any, TextIO
@@ -302,7 +303,7 @@ class BenchmarkRunner:
         """
         api_server = APIServerManager(model=model, config=self.api_server_config)
         benchmark: VllmPerformanceBenchmark | None = None
-        monitoring_proc: multiprocessing.Process | None = None
+        monitoring_proc: BaseProcess | None = None
         stop_monitor_event: EventType | None = None
         desc = ""
 
@@ -328,7 +329,7 @@ class BenchmarkRunner:
             )
             benchmark.setup()
 
-            stop_monitor_event = multiprocessing.Event()
+            stop_monitor_event = multiprocessing.get_context("spawn").Event()
             monitoring_proc = HardwareMonitor.start_monitor(
                 api_server.config.host,
                 api_server.config.port,
@@ -379,12 +380,12 @@ class BenchmarkRunner:
         self.benchmark_config.used_device_num = len((self.api_server_config.devices or "").split(","))
 
     def _stop_monitor(
-        self, proc: multiprocessing.Process, event: EventType
+        self, proc: BaseProcess, event: EventType
     ) -> None:
         """Stop the monitoring process with graceful → terminate → kill escalation.
 
         Args:
-            proc: The monitoring :class:`multiprocessing.Process` to stop.
+            proc: The monitoring process to stop.
             event: The stop event to signal first.
         """
         event.set()
@@ -401,7 +402,7 @@ class BenchmarkRunner:
     def _cleanup(
         self,
         benchmark: VllmPerformanceBenchmark | None,
-        monitoring_proc: multiprocessing.Process | None,
+        monitoring_proc: BaseProcess | None,
         stop_monitor_event: EventType | None,
         api_server: APIServerManager | None,
         desc: str,

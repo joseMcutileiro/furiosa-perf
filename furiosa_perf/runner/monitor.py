@@ -8,12 +8,13 @@ CSV-compatible log file.
 from __future__ import annotations
 
 import contextlib
+import multiprocessing
 import re
 import subprocess
 import time
 from dataclasses import astuple, dataclass, fields
 from datetime import UTC, datetime
-from multiprocessing import Process
+from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Event as EventType
 from pathlib import Path
 from typing import Any
@@ -84,7 +85,7 @@ class HardwareMonitor:
         used_device_num: int,
         result_dir_path: Path,
         stop_event: EventType,
-    ) -> Process:
+    ) -> BaseProcess:
         """Start a monitoring process and return it.
 
         Args:
@@ -99,7 +100,9 @@ class HardwareMonitor:
         target_function = HardwareMonitor._monitor_npu if device_name == "RNGD" else HardwareMonitor._monitor_gpu
 
         result_file_path = result_dir_path / f"{device_name}_{used_device_num}_monitoring_log.csv"
-        proc = Process(
+        # spawn, not fork: the parent already initialised furiosa_smi_py (collect_env),
+        # and a forked child deadlocks on its inherited native locks.
+        proc = multiprocessing.get_context("spawn").Process(
             target=target_function,
             args=(host, port, server_pid, result_file_path, stop_event),
         )
