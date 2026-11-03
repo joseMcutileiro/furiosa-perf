@@ -383,12 +383,18 @@ class HardwareMonitor:
             A dict with keys ``mean_power``, ``p95_power``, and ``p99_power``
             (all zero when the filtered window is empty or the file is unreadable).
         """
-        df = pd.read_csv(
-            csv_file_path,
-            parse_dates=["timestamp"],
-            keep_default_na=False,
-        )
         power_metrics_info = {"mean_power": 0, "p95_power": 0, "p99_power": 0}
+        # A monitor that died early leaves the CSV missing or empty. Report zero power
+        # instead of aborting the whole run.
+        try:
+            df = pd.read_csv(
+                csv_file_path,
+                parse_dates=["timestamp"],
+                keep_default_na=False,
+            )
+        except (OSError, ValueError, pd.errors.EmptyDataError) as e:
+            logger.error(f"Error reading monitoring data: {e}")
+            return power_metrics_info
         mask = pd.Series(True, index=df.index)
         try:
             if start_dt is not None:
