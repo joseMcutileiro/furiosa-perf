@@ -57,6 +57,7 @@ def make_bench(tmp_path: Path) -> VllmPerformanceBenchmark:
     bench.base_dir = tmp_path
     bench.total_results = {}
     bench._reset_unavailable = False
+    bench._cache_reset_ok = False
     bench.BASE_COMMAND = [arg.replace("{exe}", "python") for arg in bench.COMMAND]
     return bench
 
@@ -77,6 +78,7 @@ def test_parse_returns_none_without_counters() -> None:
 
 def test_hit_rate_uses_the_delta_and_leaves_out_the_warmup(tmp_path: Path) -> None:
     bench = make_bench(tmp_path)
+    bench._cache_reset_ok = True
     scenario = LLMScenarioConfig(input_tokens=1024, random_prefix_len=3072, output_tokens=64)
     # A 4096-token warmup (4095 lookups, 0 hits), then one timed request that hits the prefix
     # (3072 of 4095). As measured on furiosa-llm 2026.4.0.
@@ -230,3 +232,40 @@ def test_temperature_defaults_to_0_and_follows_the_environment(
     assert "--temperature=0" in bench._get_command_for_scenario(LLMScenarioConfig())
     monkeypatch.setenv("FURIOSA_PERF_TEMPERATURE", "1")
     assert "--temperature=1" in bench._get_command_for_scenario(LLMScenarioConfig())
+
+
+def warmup_counters() -> tuple[PrefixCacheCounters, PrefixCacheCounters]:
+    """A 4096-token warmup (all miss) and one timed request hitting 3072 tokens."""
+    return PrefixCacheCounters(queries=0, hits=0), PrefixCacheCounters(queries=8190, hits=3072)
+
+
+def test_warmup_stays_in_the_hit_rate_without_a_reset(tmp_path: Path) -> None:
+    bench = make_bench(tmp_path)
+    scenario = LLMScenarioConfig(input_tokens=1024, random_prefix_len=3072)
+    summary = bench._prefix_cache_summary(scenario, *warmup_counters())
+    assert summary["Prefix Cache Hit Rate(%)"] == 37.51
+
+
+def test_warmup_stays_in_the_hit_rate_for_vision_prompts(tmp_path: Path) -> None:
+    bench = make_bench(tmp_path)
+    bench.task = "vl-offline"
+    bench._cache_reset_ok = True
+    scenario = LLMScenarioConfig(input_tokens=1024, random_prefix_len=3072)
+    summary = bench._prefix_cache_summary(scenario, *warmup_counters())
+    assert summary["Prefix Cache Hit Rate(%)"] == 37.51
+
+
+@pytest.mark.parametrize(("status", "reset_ok"), [(200, True), (404, False), (500, False)])
+def test_reset_records_whether_it_worked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, reset_ok: bool
+) -> None:
+    monkeypatch.setattr(vllm_mod.requests, "post", lambda url, **_: FakeResponse(status))
+    bench = make_bench(tmp_path)
+    bench._cache_reset_ok = True
+    bench._reset_prefix_cache()
+    assert bench._cache_reset_ok is reset_ok
+
+
+def test_vllm_bench_is_pinned(tmp_path: Path) -> None:
+    install = dict(VllmPerformanceBenchmark.ENV["SETUP_COMMANDS"])["install_package"]
+    assert "vllm==0.32.0" in install

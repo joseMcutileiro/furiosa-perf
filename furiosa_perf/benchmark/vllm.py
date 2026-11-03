@@ -30,7 +30,7 @@ class VllmPerformanceBenchmark:
     ENV: dict[str, Any] = {
         "SETUP_COMMANDS": [
             ("create_venv", ["uv", "venv", "--python", "3.12", "{venv_dir}"]),
-            ("install_package", ["uv", "pip", "install", "--python", "{python_exe}", "vllm"]),
+            ("install_package", ["uv", "pip", "install", "--python", "{python_exe}", "vllm==0.32.0"]),
         ],
     }
 
@@ -122,6 +122,8 @@ class VllmPerformanceBenchmark:
         self.bench_process: subprocess.Popen[str] | None = None
         # Set once the server answers 404 on /reset_prefix_cache, to warn only once.
         self._reset_unavailable = False
+        # Whether the current scenario started with a successful cache reset.
+        self._cache_reset_ok = False
         self.env: dict[str, Any] = env or {}
 
         self.base_dir = self.get_base_dir()
@@ -349,6 +351,7 @@ class VllmPerformanceBenchmark:
         (``FURIOSA_SERVER_DEV_MODE=1`` or ``VLLM_SERVER_DEV_MODE=1``). Without it, the
         reset is skipped with a single warning.
         """
+        self._cache_reset_ok = False
         if not self.host or not self.port or self._reset_unavailable:
             return
         url = f"http://{self.host}:{self.port}/reset_prefix_cache"
@@ -367,6 +370,7 @@ class VllmPerformanceBenchmark:
             logger.warning(f"Prefix cache reset failed: HTTP {resp.status_code} {resp.text[:200]}")
         else:
             logger.info("Prefix cache reset.")
+            self._cache_reset_ok = True
             self._absorb_first_lookup()
 
     def _absorb_first_lookup(self) -> None:
@@ -401,8 +405,10 @@ class VllmPerformanceBenchmark:
 
         The counters are cumulative, so the delta between the snapshots taken right
         before and after the benchmark covers exactly this scenario's requests (assuming
-        no other traffic hits the server). The cache itself is not reset between
-        scenarios, so later scenarios may reuse prefixes cached by earlier ones.
+        no other traffic hits the server). After a successful reset, the scenario
+        starts from an empty cache and its warmup request is left out of the hit rate.
+        Without a reset, the hit rate covers the warmup too, and the scenario may reuse
+        cache entries left by earlier ones.
 
         Args:
             scenario: Scenario that was just run.
@@ -426,10 +432,11 @@ class VllmPerformanceBenchmark:
 
         queries = after.queries - before.queries
         hits = after.hits - before.hits
-        if prefix_tokens and queries > 0:
+        if prefix_tokens and queries > 0 and self._cache_reset_ok and self.task == "offline":
             # The warmup request runs right after the cache reset, so it is a full miss:
             # every prompt token but the last is looked up, none is found. Leave it out,
-            # so the hit rate only covers the timed requests.
+            # so the hit rate only covers the timed requests. Only for text prompts: the
+            # length of a vl-offline prompt also depends on its images.
             queries -= scenario.input_tokens + prefix_tokens - 1
         if queries <= 0:
             if prefix_tokens:
