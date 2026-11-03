@@ -208,6 +208,10 @@ scenarios:
 | `reranker` | Reranking | `random_batch_size` |
 | `embeddings` | Text embeddings | — |
 
+Requests use greedy sampling (`--temperature=0`). Set `FURIOSA_PERF_TEMPERATURE`
+to change it, e.g. `FURIOSA_PERF_TEMPERATURE=1` for gpt-oss-120b, as in the SDK
+benchmark report.
+
 #### Prefix caching scenarios
 
 `random_prefix_len` (default `0`) prepends the same fixed prefix to every prompt

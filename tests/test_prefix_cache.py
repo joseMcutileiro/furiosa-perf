@@ -220,3 +220,13 @@ def test_power_summary_survives_a_missing_monitor_csv(tmp_path: Path) -> None:
         csv_file_path=tmp_path / "missing.csv", start_dt=None, end_dt=None, target_csv_file_path=None
     )
     assert summary == {"mean_power": 0, "p95_power": 0, "p99_power": 0}
+
+
+def test_temperature_defaults_to_0_and_follows_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = make_bench(tmp_path)
+    monkeypatch.delenv("FURIOSA_PERF_TEMPERATURE", raising=False)
+    assert "--temperature=0" in bench._get_command_for_scenario(LLMScenarioConfig())
+    monkeypatch.setenv("FURIOSA_PERF_TEMPERATURE", "1")
+    assert "--temperature=1" in bench._get_command_for_scenario(LLMScenarioConfig())

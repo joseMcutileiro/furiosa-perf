@@ -52,7 +52,7 @@ class VllmPerformanceBenchmark:
         "--ready-check-timeout-sec=0",
         "--num-warmups={num_warmups}",
         "--trust-remote-code",
-        "--temperature=0",
+        "--temperature={temperature}",
     ]
 
     VLLM_COMMANDS: dict[str, list[str]] = {
@@ -238,6 +238,9 @@ class VllmPerformanceBenchmark:
             # warmup request puts the prefix in the cache, so the timed run measures the
             # steady state instead of a cold start.
             "num_warmups": 1 if self._scenario_prefix_tokens(scenario) else 0,
+            # Sampling temperature, 0 (greedy) unless set. The SDK report runs
+            # gpt-oss-120b at 1.
+            "temperature": os.environ.get("FURIOSA_PERF_TEMPERATURE", "0"),
         }
 
     def _get_command_for_scenario(self, scenario: ScenarioConfig) -> list[str]:
