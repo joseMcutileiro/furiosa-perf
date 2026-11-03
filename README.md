@@ -256,7 +256,9 @@ Each scenario runs in three steps:
    (`--num-warmups=1`). It carries the shared prefix, so the timed run starts with
    the prefix cached, like a server that has been running for a while. Without
    it, every request of the first wave misses, because none has finished its
-   prefill yet. The warmup request counts in the hit rate.
+   prefill yet. The warmup request is left out of the hit rate. It repeats
+   prompt 0, so the timed prompt 0 is a full hit: prefix scenarios get at least
+   10 prompts to keep that small.
 3. **Timed run.**
 
 Prefix-cache scenarios get their own summary files (`summary_<ISL>_<OSL>_p<PREFIX>`)

@@ -164,11 +164,17 @@ class LLMScenarioConfig(BaseScenarioConfig):
     def __post_init__(self) -> None:
         """Default num_prompts to max_concurrency × 3 when not set; validate the prefix length.
 
+        Scenarios with a shared prefix get at least 10 prompts. Their warmup request
+        repeats prompt 0, so the timed prompt 0 is a full cache hit. More prompts
+        keep that one request a small share of the run.
+
         Raises:
             ValueError: If ``random_prefix_len`` is negative.
         """
         if self.num_prompts is None:
             self.num_prompts = self.max_concurrency * 3
+            if self.random_prefix_len:
+                self.num_prompts = max(self.num_prompts, 10)
         if self.random_prefix_len < 0:
             raise ValueError(f"random_prefix_len must be >= 0, got {self.random_prefix_len}")
 

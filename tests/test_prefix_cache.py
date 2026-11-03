@@ -75,13 +75,33 @@ def test_parse_returns_none_without_counters() -> None:
     assert HardwareMonitor.parse_prefix_cache_counters("# nothing\nfoo_total 1\n") is None
 
 
-def test_hit_rate_uses_the_delta_between_snapshots(tmp_path: Path) -> None:
+def test_hit_rate_uses_the_delta_and_leaves_out_the_warmup(tmp_path: Path) -> None:
     bench = make_bench(tmp_path)
     scenario = LLMScenarioConfig(input_tokens=1024, random_prefix_len=3072, output_tokens=64)
+    # A 4096-token warmup (4095 lookups, 0 hits), then one timed request that hits the prefix
+    # (3072 of 4095). As measured on furiosa-llm 2026.4.0.
     summary = bench._prefix_cache_summary(
-        scenario, PrefixCacheCounters(queries=1000, hits=500), PrefixCacheCounters(queries=5096, hits=3572)
+        scenario, PrefixCacheCounters(queries=1000, hits=500), PrefixCacheCounters(queries=9190, hits=3572)
     )
-    assert summary == {"Prefix Tokens": 3072, "Prefix Cache Hit Rate(%)": 75.0}
+    assert summary == {"Prefix Tokens": 3072, "Prefix Cache Hit Rate(%)": 75.02}
+
+
+def test_plain_hit_rate_keeps_every_lookup(tmp_path: Path) -> None:
+    bench = make_bench(tmp_path)
+    scenario = LLMScenarioConfig(input_tokens=4096, output_tokens=64)
+    summary = bench._prefix_cache_summary(
+        scenario, PrefixCacheCounters(queries=0, hits=0), PrefixCacheCounters(queries=8190, hits=4095)
+    )
+    assert summary == {"Prefix Tokens": 0, "Prefix Cache Hit Rate(%)": 50.0}
+
+
+@pytest.mark.parametrize(
+    ("prefix", "concurrency", "expected"),
+    [(0, 1, 3), (0, 8, 24), (3072, 1, 10), (3072, 2, 10), (3072, 8, 24)],
+)
+def test_prefix_scenarios_get_at_least_10_prompts(prefix: int, concurrency: int, expected: int) -> None:
+    scenario = LLMScenarioConfig(random_prefix_len=prefix, max_concurrency=concurrency)
+    assert scenario.num_prompts == expected
 
 
 @pytest.mark.parametrize(

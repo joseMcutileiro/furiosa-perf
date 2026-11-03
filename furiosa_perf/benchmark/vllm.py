@@ -423,6 +423,11 @@ class VllmPerformanceBenchmark:
 
         queries = after.queries - before.queries
         hits = after.hits - before.hits
+        if prefix_tokens and queries > 0:
+            # The warmup request runs right after the cache reset, so it is a full miss:
+            # every prompt token but the last is looked up, none is found. Leave it out,
+            # so the hit rate only covers the timed requests.
+            queries -= scenario.input_tokens + prefix_tokens - 1
         if queries <= 0:
             if prefix_tokens:
                 logger.warning(
