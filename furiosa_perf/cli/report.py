@@ -91,8 +91,14 @@ def collect_and_build_report_html(
 
     s = total_df["device"].dropna()
     latest_furiosa_version = s.str.extract(r"furiosa-llm_(.*)")[0].dropna().max()
-    for (input_tokens, output_tokens), group in total_df.groupby(["ISL", "OSL"]):
+    # Prefix-cache runs get their own section instead of mixing with plain runs of the same shape.
+    for (input_tokens, output_tokens, prefix), group in total_df.groupby(["ISL", "OSL", "Prefix"]):
         tokens = f"{input_tokens}/{output_tokens}"
+        columns = TABLE_COLUMNS
+        if prefix:
+            # No spaces: the label is also part of the chart element ids.
+            tokens += f"/p{prefix:.0f}"
+            columns = [*TABLE_COLUMNS, "Prefix", "PrefixHit(%)"]
 
         pat = latest_furiosa_version
         table_group = group.iloc[0:0] if pd.isna(pat) else group[group["device"].str.contains(pat, na=False)]
@@ -102,7 +108,7 @@ def collect_and_build_report_html(
                 "tokens": tokens,
                 "html": [
                     fig_to_lazy_html(
-                        plot_table_chart(table_group, TABLE_COLUMNS),
+                        plot_table_chart(table_group, columns),
                         f"{target_model}-{task}-{tokens}-rngd-{latest_furiosa_version}-table",
                         config={"responsive": True},
                     ),
@@ -205,7 +211,8 @@ def build_summary_data(frames: list[pd.DataFrame]) -> dict[str, Any] | None:
         return None
     df = pd.concat(frames, ignore_index=True)
     isl, osl = SUMMARY_SCENARIO_ISL_OSL
-    df = df[(df["ISL"] == isl) & (df["OSL"] == osl)].copy()
+    # Plain runs only: a prefix-cache run of the same shape is not comparable.
+    df = df[(df["ISL"] == isl) & (df["OSL"] == osl) & (df["Prefix"] == 0)].copy()
     if df.empty:
         return None
 

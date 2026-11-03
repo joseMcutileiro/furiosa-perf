@@ -55,6 +55,9 @@ class BenchmarkMetricLoader:
             {
                 "ISL": col("input_tokens"),
                 "OSL": col("output_tokens"),
+                # Shared-prefix length. 0 for plain runs and for summaries from before
+                # the column existed.
+                "Prefix": col("prefix_tokens"),
                 "Concurrent": col("concurrent"),
             }
         ).assign(
@@ -71,6 +74,8 @@ class BenchmarkMetricLoader:
                 "Median_TPOT(ms)": (col("median_tpot")).round(2),
                 "E2EL(s)": (col("mean_e2el")).round(2),
                 "Power(w)": col("mean_power", 0.0),
+                # NaN when the server reported no prefix-cache lookups ("N/A" in the CSV).
+                "PrefixHit(%)": col("prefix_cache_hit_rate", np.nan),
                 "device": f"{device}x{num}+{backend}_{version}",
                 "hardware": device,
                 "num_devices": int(num),

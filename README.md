@@ -226,11 +226,15 @@ scenarios:
 
 Prefix caching must be on in the server: set `no_enable_prefix_caching: false` in
 the server config, or drop `--no-enable-prefix-caching` if you launch the server
-yourself.
+yourself. Also start the server in dev mode (`FURIOSA_SERVER_DEV_MODE=1` for
+furiosa-llm, `VLLM_SERVER_DEV_MODE=1` for vLLM), so furiosa-perf can empty the
+cache before each scenario (see below).
 
 Every scenario reports two summary columns:
 
-- `Prefix Tokens`: the scenario's `random_prefix_len`.
+- `Input Tokens`: the full prompt length, `random_prefix_len + input_tokens`.
+- `Prefix Tokens`: the scenario's `random_prefix_len`, the part of each prompt
+  shared by every request.
 - `Prefix Cache Hit Rate(%)`: the share of prompt tokens served from the prefix
   cache during the scenario. It comes from the server's cumulative `/metrics`
   counters (`vllm:prefix_cache_hits` / `vllm:prefix_cache_queries`, or the
@@ -238,10 +242,26 @@ Every scenario reports two summary columns:
   It is `N/A` when the server exposes no such counters, or when no cache lookup
   happened (prefix caching disabled).
 
-The cache is not cleared between scenarios, so a scenario can hit prefixes left
-over from earlier ones. Run on an otherwise idle server: other traffic would be
-counted in the hit rate.
+Each scenario runs in three steps:
 
+1. **Reset.** furiosa-perf calls `POST /reset_prefix_cache`. vLLM bench uses the
+   same seed in every scenario, so two scenarios with the same `num_prompts` send
+   the same prompts. Without the reset, a scenario would hit the cache entries an
+   earlier one left. The endpoint only exists in dev mode. Without it,
+   furiosa-perf warns once and runs without resetting. After the reset,
+   furiosa-perf sends one 1-token request: furiosa-llm 2026.4 counts only the
+   first 1024 queried tokens of the first request after a reset, which would
+   understate `prefix_cache_queries`.
+2. **Warmup.** Scenarios with `random_prefix_len > 0` send one warmup request
+   (`--num-warmups=1`). It carries the shared prefix, so the timed run starts with
+   the prefix cached, like a server that has been running for a while. Without
+   it, every request of the first wave misses, because none has finished its
+   prefill yet. The warmup request counts in the hit rate.
+3. **Timed run.**
+
+Prefix-cache scenarios get their own summary files (`summary_<ISL>_<OSL>_p<PREFIX>`)
+and their own section in the HTML report, with the hit rate in the table. Run on an
+otherwise idle server: other traffic would be counted in the hit rate.
 ---
 
 ## Outputs

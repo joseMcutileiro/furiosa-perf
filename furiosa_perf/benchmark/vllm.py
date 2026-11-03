@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import requests
 from pytablewriter import MarkdownTableWriter
 
 from furiosa_perf.runner.monitor import HardwareMonitor, PrefixCacheCounters
@@ -49,6 +50,7 @@ class VllmPerformanceBenchmark:
         "--save-result",
         "--result-dir={result_dir}",
         "--ready-check-timeout-sec=0",
+        "--num-warmups={num_warmups}",
         "--trust-remote-code",
         "--temperature=0",
     ]
@@ -118,6 +120,8 @@ class VllmPerformanceBenchmark:
         self.host = host
         self.port = port
         self.bench_process: subprocess.Popen[str] | None = None
+        # Set once the server answers 404 on /reset_prefix_cache, to warn only once.
+        self._reset_unavailable = False
         self.env: dict[str, Any] = env or {}
 
         self.base_dir = self.get_base_dir()
@@ -230,6 +234,10 @@ class VllmPerformanceBenchmark:
             **asdict(scenario),
             "model": self.model,
             "result_dir": self.get_vllm_result_dir(self._scenario_result_name(scenario)),
+            # vLLM warms up with the first prompt, which carries the shared prefix. One
+            # warmup request puts the prefix in the cache, so the timed run measures the
+            # steady state instead of a cold start.
+            "num_warmups": 1 if self._scenario_prefix_tokens(scenario) else 0,
         }
 
     def _get_command_for_scenario(self, scenario: ScenarioConfig) -> list[str]:
@@ -281,6 +289,7 @@ class VllmPerformanceBenchmark:
         command = self._get_command_for_scenario(scenario)
         logger.info(f"Executing: {' '.join(command)} | cwd: {cwd}")
 
+        self._reset_prefix_cache()
         cache_before = self._snapshot_prefix_cache()
         start_timestamp = datetime.now(UTC).isoformat()
         env = os.environ.copy()
@@ -325,6 +334,53 @@ class VllmPerformanceBenchmark:
         result.update(self._prefix_cache_summary(scenario, cache_before, cache_after))
         logger.info(f"Parsed result: {result}")
         return result
+
+    def _reset_prefix_cache(self) -> None:
+        """Empty the server's prefix cache, so each scenario starts cold.
+
+        vLLM bench seeds its random prompts with the same seed in every scenario, so
+        two scenarios with the same number of prompts send the same prompts. Without a
+        reset, a scenario would hit the cache entries left by an earlier one.
+
+        furiosa-llm and vLLM only expose ``POST /reset_prefix_cache`` in dev mode
+        (``FURIOSA_SERVER_DEV_MODE=1`` or ``VLLM_SERVER_DEV_MODE=1``). Without it, the
+        reset is skipped with a single warning.
+        """
+        if not self.host or not self.port or self._reset_unavailable:
+            return
+        url = f"http://{self.host}:{self.port}/reset_prefix_cache"
+        try:
+            resp = requests.post(url, timeout=60)
+        except requests.RequestException as e:
+            logger.warning(f"Could not reset the prefix cache: {e}")
+            return
+        if resp.status_code == 404:
+            self._reset_unavailable = True
+            logger.warning(
+                "The server has no /reset_prefix_cache, so scenarios may hit each other's cache entries. "
+                "If prefix caching is on, start the server with FURIOSA_SERVER_DEV_MODE=1 (or VLLM_SERVER_DEV_MODE=1)."
+            )
+        elif not resp.ok:
+            logger.warning(f"Prefix cache reset failed: HTTP {resp.status_code} {resp.text[:200]}")
+        else:
+            logger.info("Prefix cache reset.")
+            self._absorb_first_lookup()
+
+    def _absorb_first_lookup(self) -> None:
+        """Send one tiny request right after a cache reset.
+
+        furiosa-llm 2026.4 counts only the first 1024 queried tokens of the first
+        request after a reset, so `prefix_cache_queries` comes out short by up to a
+        whole prompt. A 1-token prompt takes that first lookup and costs nothing.
+        """
+        try:
+            requests.post(
+                f"http://{self.host}:{self.port}/v1/completions",
+                json={"model": self.model, "prompt": "Hi", "max_tokens": 1},
+                timeout=60,
+            ).raise_for_status()
+        except requests.RequestException as e:
+            logger.warning(f"Request after the cache reset failed, the hit rate may be off: {e}")
 
     def _snapshot_prefix_cache(self) -> PrefixCacheCounters | None:
         """Read the server's prefix-cache counters, or ``None`` when host/port are unknown."""
@@ -393,7 +449,9 @@ class VllmPerformanceBenchmark:
             Dict of metric name → value, keyed with display-friendly names.
         """
         results: dict[str, Any] = {
-            "Input Tokens": scenario.input_tokens,
+            # The full prompt length, shared prefix included, as the model sees it.
+            # "Prefix Tokens" says how much of it is shared.
+            "Input Tokens": scenario.input_tokens + self._scenario_prefix_tokens(scenario),
             "Output Tokens": self._scenario_output_tokens(scenario),
             "Concurrent": scenario.max_concurrency,
         }
@@ -428,6 +486,9 @@ class VllmPerformanceBenchmark:
         isl_osl_result: dict[str, list[Any]] = defaultdict(list)
         for sub_result in scenario_results:
             key = self._to_isl_osl_result(sub_result["Input Tokens"], sub_result["Output Tokens"])
+            # Keep prefix-cache runs apart from plain runs of the same shape.
+            if prefix_tokens := sub_result.get("Prefix Tokens"):
+                key += f"_p{prefix_tokens}"
             isl_osl_result[key].append(list(sub_result.values()))
 
         total_rows: list[Any] = []
