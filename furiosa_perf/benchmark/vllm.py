@@ -1,11 +1,12 @@
 """vLLM-based performance benchmark implementation."""
 
+import contextlib
 import os
 import signal
 import subprocess
 from collections import defaultdict
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,11 @@ from furiosa_perf.utils.config import PerformanceBenchConfig, ScenarioConfig
 from furiosa_perf.utils.logger import logger
 
 WORKSPACE = "./bench_space"
+
+# vLLM bench prints this right before it starts the timed requests, after the
+# dataset, the tokenizer and the warmup are ready.
+MAIN_RUN_MARKER = "Starting main benchmark run..."
+DURATION_MARKER = "Benchmark duration (s):"
 
 
 class VllmPerformanceBenchmark:
@@ -300,6 +306,9 @@ class VllmPerformanceBenchmark:
         env = os.environ.copy()
         if hf_token := self.env.get("HF_TOKEN"):
              env["HF_TOKEN"] = hf_token
+        # Print each line as soon as it is written, so the time we read
+        # MAIN_RUN_MARKER is the time vLLM bench starts the timed requests.
+        env["PYTHONUNBUFFERED"] = "1"
         self.bench_process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -312,8 +321,11 @@ class VllmPerformanceBenchmark:
         )
 
         output_lines: list[str] = []
+        main_run_start: datetime | None = None
         if self.bench_process.stdout is not None:
             for line in self.bench_process.stdout:
+                if main_run_start is None and MAIN_RUN_MARKER in line:
+                    main_run_start = datetime.now(UTC)
                 logger.info(line.strip())
                 output_lines.append(line)
 
@@ -326,12 +338,14 @@ class VllmPerformanceBenchmark:
         end_timestamp = datetime.now(UTC).isoformat()
         cache_after = self._snapshot_prefix_cache()
 
-        result = self._parse_results("".join(output_lines), scenario)
+        stdout = "".join(output_lines)
+        power_start, power_end = self._power_window(stdout, main_run_start, start_timestamp, end_timestamp)
+        result = self._parse_results(stdout, scenario)
         result.update(
             HardwareMonitor.get_benchmark_power_summary(
                 csv_file_path=self.base_dir / f"{self.device_name}_{self.used_device_num}_monitoring_log.csv",
-                start_dt=start_timestamp,
-                end_dt=end_timestamp,
+                start_dt=power_start,
+                end_dt=power_end,
                 target_csv_file_path=self.get_vllm_result_dir(self._scenario_result_name(scenario))
                 / f"{self.device_name}_{self.used_device_num}_monitoring_log.csv",
             )
@@ -339,6 +353,42 @@ class VllmPerformanceBenchmark:
         result.update(self._prefix_cache_summary(scenario, cache_before, cache_after))
         logger.info(f"Parsed result: {result}")
         return result
+
+    @staticmethod
+    def _power_window(
+        stdout: str, main_run_start: datetime | None, process_start: str, process_end: str
+    ) -> tuple[str, str]:
+        """Return the (start, end) ISO timestamps that the power average covers.
+
+        The window covers only the timed requests: it starts when vLLM bench prints
+        MAIN_RUN_MARKER and lasts the reported benchmark duration. The seconds before
+        it (vLLM import, tokenizer, dataset, warmup) and after it (metrics, result
+        files) leave the devices idle, and counting them would lower the mean power.
+
+        Falls back to the whole subprocess lifetime when either marker is missing.
+
+        Args:
+            stdout: Full standard output of the benchmark subprocess.
+            main_run_start: When MAIN_RUN_MARKER was read, or ``None``.
+            process_start: ISO timestamp taken before the subprocess started.
+            process_end: ISO timestamp taken after the subprocess exited.
+
+        Returns:
+            The (start, end) ISO timestamps of the window.
+        """
+        duration: float | None = None
+        for line in stdout.splitlines():
+            if DURATION_MARKER in line:
+                with contextlib.suppress(ValueError):
+                    duration = float(line.split()[-1])
+        if main_run_start is None or duration is None:
+            logger.warning(
+                "Could not find when the timed requests ran in the vLLM bench output; "
+                "the power covers the whole benchmark process, idle seconds included."
+            )
+            return process_start, process_end
+        end = main_run_start + timedelta(seconds=duration)
+        return main_run_start.isoformat(timespec="microseconds"), end.isoformat(timespec="microseconds")
 
     def _reset_prefix_cache(self) -> None:
         """Empty the server's prefix cache, so each scenario starts cold.
